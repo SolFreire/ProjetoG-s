@@ -1,0 +1,7 @@
+{
+    "files.associations": {
+        "adc_cali_scheme.h": "c",
+        "esp_err.h": "c",
+        "gpio.h": "c"
+    }
+}
