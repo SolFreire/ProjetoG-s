@@ -10,6 +10,11 @@
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "driver/gpio.h"
+#include "esp_bt.h"
+#include "esp_bt_main.h"
+#include "esp_bt_device.h"
+#include "esp_spp_api.h"
+
 
 const static char *TAG = "EXAMPLE";
 
@@ -23,7 +28,11 @@ const static char *TAG = "EXAMPLE";
 #define SENSOR_MAX_VOLTAGE 4700 // Tensão máxima em mV (4.7V)
 #define MAX_PRESSURE 10  // Faixa máxima de pressão do MPX5010 (10 kPa)
 
+#define SPP_SERVER_NAME "ESP32_BT"
+#define DEVICE_NAME "ESP32_Bluetooth"
 
+static uint32_t bt_handle = 0;
+void spp_callback(esp_spp_cb_event_t event, esp_spp_cb_param_t *param);
 
 
 static int adc_raw[2][10];
@@ -32,7 +41,55 @@ static bool example_adc_calibration_init(adc_unit_t unit, adc_channel_t channel,
 static void example_adc_calibration_deinit(adc_cali_handle_t handle);
 
 void app_main(void)
-{
+{   
+    esp_err_t ret = esp_bt_controller_mem_release(ESP_BT_MODE_BLE); // Desativa BLE se não for usar
+    if (ret) {
+        ESP_LOGE(TAG, "Bluetooth controller release failed: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+    ret = esp_bt_controller_init(&bt_cfg);
+    if (ret) {
+        ESP_LOGE(TAG, "Bluetooth controller init failed: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    ret = esp_bt_controller_enable(ESP_BT_MODE_CLASSIC_BT);
+    if (ret) {
+        ESP_LOGE(TAG, "Bluetooth controller enable failed: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    ret = esp_bluedroid_init();
+    if (ret) {
+        ESP_LOGE(TAG, "Bluedroid init failed: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    ret = esp_bluedroid_enable();
+    if (ret) {
+        ESP_LOGE(TAG, "Bluedroid enable failed: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    ret = esp_spp_register_callback(spp_callback);
+    if (ret) {
+        ESP_LOGE(TAG, "SPP register callback failed: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    ret = esp_spp_init(ESP_SPP_MODE_CB);
+    if (ret) {
+        ESP_LOGE(TAG, "SPP init failed: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    esp_bt_dev_set_device_name(DEVICE_NAME);
+    esp_spp_start_srv(ESP_SPP_SEC_AUTHENTICATE, ESP_SPP_ROLE_SLAVE, 0, SPP_SERVER_NAME);
+
+
+
     //-------------ADC1 Init---------------//
     adc_oneshot_unit_handle_t adc1_handle;
     adc_oneshot_unit_init_cfg_t init_config1 = {
@@ -80,13 +137,20 @@ void app_main(void)
              ESP_LOGI(TAG, "Average Voltage: %d mV", voltage[0][0] * 2);
         }
 
-        float Vout = voltage[0][0] * 2; // Tensão medida em mV
+        float Vout = voltage_mV * 2; // Tensão medida em mV
         float Vs = 5000; 
 
         if (Vout >= SENSOR_MIN_VOLTAGE)
         {
             float pressure_kPa = ((Vout / Vs) - 0.04) / 0.09;
             ESP_LOGI(TAG, "Pressure: %.2f kPa", pressure_kPa);
+
+            if (bt_handle != 0)
+            {  
+                char bt_message[100];
+                snprintf(bt_message, sizeof(bt_message), "Pressure: %.2f kPa\n", pressure_kPa);
+                esp_spp_write(bt_handle, strlen(bt_message), (uint8_t *)bt_message);
+            }
         } else 
         {
                 ESP_LOGW(TAG, "Voltage below minimum. Invalid reading.");
@@ -107,6 +171,25 @@ void app_main(void)
     if (do_calibration1_chan0)
     {
         example_adc_calibration_deinit(adc1_cali_chan0_handle);
+    }
+}
+
+void spp_callback(esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
+{
+    switch (event)
+    {
+        case ESP_SPP_SRV_OPEN_EVT:
+            ESP_LOGI(TAG, "Client connected, handle=%d", param->srv_open.handle);
+            bt_handle = param->srv_open.handle;  // Armazena o handle da conexão
+            break;
+
+        case ESP_SPP_CLOSE_EVT:
+            ESP_LOGI(TAG, "Client disconnected, handle=%d", param->close.handle);
+            bt_handle = 0;  // Reseta o handle quando o cliente desconecta
+            break;
+
+        default:
+            break;
     }
 }
 
