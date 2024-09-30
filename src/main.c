@@ -31,8 +31,9 @@ const static char *TAG = "EXAMPLE";
 #define SPP_SERVER_NAME "ESP32_BT"
 #define DEVICE_NAME "ESP32_Bluetooth"
 
-static uint32_t bt_handle = 0;
+//static uint32_t bt_handle = 0;
 void spp_callback(esp_spp_cb_event_t event, esp_spp_cb_param_t *param);
+static float calcular_peso_percentual(float pressao_kPa);
 
 
 static int adc_raw[2][10];
@@ -40,9 +41,24 @@ static int voltage[2][10];
 static bool example_adc_calibration_init(adc_unit_t unit, adc_channel_t channel, adc_atten_t atten, adc_cali_handle_t *out_handle);
 static void example_adc_calibration_deinit(adc_cali_handle_t handle);
 
+float calcular_peso_percentual(float pressao_kPa) {
+    float pressao_minima = 1.1;  // Pressão sem peso
+    float pressao_maxima = 4.3;  // Média entre 4.2 e 4.4 kPa (5 kg)
+
+    float peso_percentual = (pressao_kPa - pressao_minima) / (pressao_maxima - pressao_minima) * 100;
+
+    if (peso_percentual < 0) {
+        peso_percentual = 0;
+    } else if (peso_percentual > 100) {
+        peso_percentual = 100;
+    }
+
+    return peso_percentual;
+}
+
 void app_main(void)
 {   
-    esp_err_t ret = esp_bt_controller_mem_release(ESP_BT_MODE_BLE); // Desativa BLE se não for usar
+    /*esp_err_t ret = esp_bt_controller_mem_release(ESP_BT_MODE_BLE); // Desativa BLE se não for usar
     if (ret) {
         ESP_LOGE(TAG, "Bluetooth controller release failed: %s", esp_err_to_name(ret));
         return;
@@ -87,6 +103,7 @@ void app_main(void)
 
     esp_bt_dev_set_device_name(DEVICE_NAME);
     esp_spp_start_srv(ESP_SPP_SEC_AUTHENTICATE, ESP_SPP_ROLE_SLAVE, 0, SPP_SERVER_NAME);
+    */
 
 
 
@@ -111,6 +128,8 @@ void app_main(void)
 
     ESP_ERROR_CHECK(gpio_reset_pin(BUZZER_GPIO));
     ESP_ERROR_CHECK(gpio_set_direction(BUZZER_GPIO, GPIO_MODE_OUTPUT));
+
+
 
     for (;;)
     {
@@ -144,13 +163,16 @@ void app_main(void)
         {
             float pressure_kPa = ((Vout / Vs) - 0.04) / 0.09;
             ESP_LOGI(TAG, "Pressure: %.2f kPa", pressure_kPa);
+            
+            float peso_percentual = calcular_peso_percentual(pressure_kPa);
+            ESP_LOGI(TAG, "Peso percentual: %.2f%%", peso_percentual);
 
-            if (bt_handle != 0)
+            /*if (bt_handle != 0)
             {  
                 char bt_message[100];
                 snprintf(bt_message, sizeof(bt_message), "Pressure: %.2f kPa\n", pressure_kPa);
                 esp_spp_write(bt_handle, strlen(bt_message), (uint8_t *)bt_message);
-            }
+            }*/
         } else 
         {
                 ESP_LOGW(TAG, "Voltage below minimum. Invalid reading.");
@@ -174,7 +196,8 @@ void app_main(void)
     }
 }
 
-void spp_callback(esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
+
+/*void spp_callback(esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
 {
     switch (event)
     {
@@ -191,7 +214,7 @@ void spp_callback(esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
         default:
             break;
     }
-}
+}*/
 
 static bool example_adc_calibration_init(adc_unit_t unit, adc_channel_t channel, adc_atten_t atten, adc_cali_handle_t *out_handle)
 {
