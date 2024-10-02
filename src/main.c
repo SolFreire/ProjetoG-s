@@ -1,21 +1,17 @@
 #include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "soc/soc_caps.h"
 #include "esp_log.h"
-#include <esp_err.h>
-#include "esp_adc/adc_oneshot.h"
-#include "esp_adc/adc_cali.h"
-#include "esp_adc/adc_cali_scheme.h"
-#include "driver/gpio.h"
 #include "esp_bt.h"
 #include "esp_bt_main.h"
-#include "esp_bt_device.h"
-#include "esp_spp_api.h"
+#include "esp_gap_ble_api.h"
+#include "esp_gatts_api.h"
+#include "esp_gatt_common_api.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_adc/adc_oneshot.h"
+#include "driver/gpio.h"
 
-
+#define DEVICE_NAME "ESP32_BLE_Weight"
+#define GATTS_TAG "GATTS_DEMO"
 const static char *TAG = "EXAMPLE";
 
 #define BUZZER_GPIO GPIO_NUM_15
@@ -28,18 +24,16 @@ const static char *TAG = "EXAMPLE";
 #define SENSOR_MAX_VOLTAGE 4700 // Tensão máxima em mV (4.7V)
 #define MAX_PRESSURE 10  // Faixa máxima de pressão do MPX5010 (10 kPa)
 
-#define SPP_SERVER_NAME "ESP32_BT"
-#define DEVICE_NAME "ESP32_Bluetooth"
+#define GATT_SERVICE_UUID 0x00FF
+#define GATT_CHAR_UUID    0xFF01
 
-//static uint32_t bt_handle = 0;
-void spp_callback(esp_spp_cb_event_t event, esp_spp_cb_param_t *param);
 static float calcular_peso_percentual(float pressao_kPa);
-
-
 static int adc_raw[2][10];
 static int voltage[2][10];
 static bool example_adc_calibration_init(adc_unit_t unit, adc_channel_t channel, adc_atten_t atten, adc_cali_handle_t *out_handle);
 static void example_adc_calibration_deinit(adc_cali_handle_t handle);
+static uint16_t peso_percentual_handle_table;
+static esp_gatt_if_t gatts_if;
 
 float calcular_peso_percentual(float pressao_kPa) {
     float pressao_minima = 1.1;  // Pressão sem peso
@@ -56,56 +50,78 @@ float calcular_peso_percentual(float pressao_kPa) {
     return peso_percentual;
 }
 
+void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param) {
+    if (event == ESP_GATTS_WRITE_EVT) {
+        // Exemplo: realizar ações quando um dado for recebido via BLE
+    }
+}
+
+void create_gatt_service() {
+    esp_gatt_srvc_id_t service_id;
+    service_id.is_primary = true;
+    service_id.id.inst_id = 0x00;
+    service_id.id.uuid.len = ESP_UUID_LEN_16;
+    service_id.id.uuid.uuid.uuid16 = GATT_SERVICE_UUID;
+
+    esp_ble_gatts_create_service(gatts_if, &service_id, 4);
+}
+
+void add_gatt_characteristic() {
+    esp_gatt_char_prop_t property = ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_NOTIFY;
+    esp_attr_value_t gatts_demo_char_val = {
+        .attr_max_len = sizeof(uint16_t),
+        .attr_len = sizeof(uint16_t),
+        .attr_value = (uint8_t*)&peso_percentual_handle_table,
+    };
+    esp_ble_gatts_add_char(peso_percentual_handle_table, &(esp_bt_uuid_t){.len = ESP_UUID_LEN_16, .uuid.uuid16 = GATT_CHAR_UUID}, 
+                           ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE, property, &gatts_demo_char_val, NULL);
+}
+
+void enviar_peso_percentual_ble(float peso_percentual) {
+    uint16_t peso_value = (uint16_t)peso_percentual;
+    esp_ble_gatts_set_attr_value(peso_percentual_handle_table, sizeof(uint16_t), (uint8_t *)&peso_value);
+    esp_ble_gatts_send_indicate(gatts_if, 0, peso_percentual_handle_table, sizeof(uint16_t), (uint8_t *)&peso_value, false);
+}
+
 void app_main(void)
 {   
-    /*esp_err_t ret = esp_bt_controller_mem_release(ESP_BT_MODE_BLE); // Desativa BLE se não for usar
+    // BLE initialization
+    esp_err_t ret = esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
     if (ret) {
-        ESP_LOGE(TAG, "Bluetooth controller release failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(GATTS_TAG, "Bluetooth controller release classic bt memory failed: %s", esp_err_to_name(ret));
         return;
     }
 
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
     ret = esp_bt_controller_init(&bt_cfg);
     if (ret) {
-        ESP_LOGE(TAG, "Bluetooth controller init failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(GATTS_TAG, "%s initialize controller failed: %s", __func__, esp_err_to_name(ret));
         return;
     }
 
-    ret = esp_bt_controller_enable(ESP_BT_MODE_CLASSIC_BT);
+    ret = esp_bt_controller_enable(ESP_BT_MODE_BLE);
     if (ret) {
-        ESP_LOGE(TAG, "Bluetooth controller enable failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(GATTS_TAG, "%s enable controller failed: %s", __func__, esp_err_to_name(ret));
         return;
     }
 
     ret = esp_bluedroid_init();
     if (ret) {
-        ESP_LOGE(TAG, "Bluedroid init failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(GATTS_TAG, "%s init bluetooth failed: %s", __func__, esp_err_to_name(ret));
         return;
     }
 
     ret = esp_bluedroid_enable();
     if (ret) {
-        ESP_LOGE(TAG, "Bluedroid enable failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(GATTS_TAG, "%s enable bluetooth failed: %s", __func__, esp_err_to_name(ret));
         return;
     }
 
-    ret = esp_spp_register_callback(spp_callback);
-    if (ret) {
-        ESP_LOGE(TAG, "SPP register callback failed: %s", esp_err_to_name(ret));
-        return;
-    }
-
-    ret = esp_spp_init(ESP_SPP_MODE_CB);
-    if (ret) {
-        ESP_LOGE(TAG, "SPP init failed: %s", esp_err_to_name(ret));
-        return;
-    }
-
-    esp_bt_dev_set_device_name(DEVICE_NAME);
-    esp_spp_start_srv(ESP_SPP_SEC_AUTHENTICATE, ESP_SPP_ROLE_SLAVE, 0, SPP_SERVER_NAME);
-    */
-
-
+    esp_ble_gatts_register_callback(gatts_profile_event_handler);
+    esp_ble_gap_set_device_name(DEVICE_NAME);
+    esp_ble_gatts_app_register(0);
+    create_gatt_service();
+    add_gatt_characteristic();
 
     //-------------ADC1 Init---------------//
     adc_oneshot_unit_handle_t adc1_handle;
@@ -128,8 +144,6 @@ void app_main(void)
 
     ESP_ERROR_CHECK(gpio_reset_pin(BUZZER_GPIO));
     ESP_ERROR_CHECK(gpio_set_direction(BUZZER_GPIO, GPIO_MODE_OUTPUT));
-
-
 
     for (;;)
     {
@@ -167,23 +181,13 @@ void app_main(void)
             float peso_percentual = calcular_peso_percentual(pressure_kPa);
             ESP_LOGI(TAG, "Peso percentual: %.2f%%", peso_percentual);
 
-            /*if (bt_handle != 0)
-            {  
-                char bt_message[100];
-                snprintf(bt_message, sizeof(bt_message), "Pressure: %.2f kPa\n", pressure_kPa);
-                esp_spp_write(bt_handle, strlen(bt_message), (uint8_t *)bt_message);
-            }*/
+            // Envia o valor do peso percentual via BLE
+            enviar_peso_percentual_ble(peso_percentual);
+
         } else 
         {
                 ESP_LOGW(TAG, "Voltage below minimum. Invalid reading.");
         }
-        //if (pressure_kPa < 0) pressure_kPa = 0;//PressureRange
-        //if (pressure_kPa > MAX_PRESSURE) pressure_kPa = MAX_PRESSURE;
-        
-
-        //gpio_set_level(BUZZER_GPIO,1);//Buzzer
-        //vTaskDelay(pdMS_TO_TICKS(200));
-        //gpio_set_level(BUZZER_GPIO,0);
 
         vTaskDelay(pdMS_TO_TICKS(5000));
     }
@@ -195,26 +199,6 @@ void app_main(void)
         example_adc_calibration_deinit(adc1_cali_chan0_handle);
     }
 }
-
-
-/*void spp_callback(esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
-{
-    switch (event)
-    {
-        case ESP_SPP_SRV_OPEN_EVT:
-            ESP_LOGI(TAG, "Client connected, handle=%d", param->srv_open.handle);
-            bt_handle = param->srv_open.handle;  // Armazena o handle da conexão
-            break;
-
-        case ESP_SPP_CLOSE_EVT:
-            ESP_LOGI(TAG, "Client disconnected, handle=%d", param->close.handle);
-            bt_handle = 0;  // Reseta o handle quando o cliente desconecta
-            break;
-
-        default:
-            break;
-    }
-}*/
 
 static bool example_adc_calibration_init(adc_unit_t unit, adc_channel_t channel, adc_atten_t atten, adc_cali_handle_t *out_handle)
 {
