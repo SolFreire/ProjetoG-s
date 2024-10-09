@@ -3,6 +3,7 @@
         "adc_cali_scheme.h": "c",
         "esp_err.h": "c",
         "gpio.h": "c",
-        "esp_spp_api.h": "c"
+        "esp_spp_api.h": "c",
+        "esp_gap_ble_api.h": "c"
     }
 }
