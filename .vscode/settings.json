@@ -4,6 +4,14 @@
         "esp_err.h": "c",
         "gpio.h": "c",
         "esp_spp_api.h": "c",
-        "esp_gap_ble_api.h": "c"
+        "esp_gap_ble_api.h": "c",
+        "esp_bt.h": "c",
+        "nvs_flash.h": "c",
+        "adc_cali.h": "c",
+        "esp_gatt_common_api.h": "c",
+        "ble_svc_gatt.h": "c",
+        "ble_svc_gap.h": "c",
+        "ble_hs.h": "c",
+        "nimble_port_freertos.h": "c"
     }
 }

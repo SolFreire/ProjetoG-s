@@ -10,8 +10,14 @@
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "driver/gpio.h"
-#include "esp_gap_ble_api.h"
-const static char *TAG = "EXAMPLE";
+#include "nimble/ble.h"
+#include "host/ble_hs.h"
+#include "esp_nimble_hci.h"
+#include "nimble/nimble_port.h"
+#include "nimble/nimble_port_freertos.h"
+#include "services/gap/ble_svc_gap.h"
+
+const static char *TAG = "";
 
 #define BUZZER_GPIO GPIO_NUM_15
 #define ADC1_CHAN3 ADC_CHANNEL_3
@@ -22,7 +28,9 @@ const static char *TAG = "EXAMPLE";
 #define SENSOR_MIN_VOLTAGE 200 // Tensão mínima em mV (0.2V)
 #define SENSOR_MAX_VOLTAGE 4700 // Tensão máxima em mV (4.7V)
 #define MAX_PRESSURE 10  // Faixa máxima de pressão do MPX5010 (10 kPa)
+#define DEVICE_NAME "ESP32_SENSOR"
 
+static uint8_t peso_percentual_char[4];
 
 static int adc_raw[2][10];
 static int voltage[2][10];
@@ -40,6 +48,38 @@ float calcular_peso_percentual(float pressao_kPa) {
     }
     return peso_percentual;
 }
+
+static int peso_percentual_char_access(uint16_t conn_handle, uint16_t attr_handle,
+                                       struct ble_gatt_access_ctxt *ctxt, void *arg) {
+    // Leitura da característica pelo cliente BLE
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        float peso_percentual = *((float*)peso_percentual_char);
+        return os_mbuf_append(ctxt->om, &peso_percentual, sizeof(peso_percentual));
+    }
+    return BLE_ATT_ERR_UNLIKELY;
+}
+
+static const struct ble_gatt_svc_def gatt_svr_svcs[] = {
+    {
+        .type = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid = BLE_UUID16_DECLARE(0x180D), // Serviço de exemplo
+        .characteristics = (struct ble_gatt_chr_def[]){
+            {
+                .uuid = BLE_UUID16_DECLARE(0x2A37), // UUID da característica
+                .access_cb = peso_percentual_char_access,
+                .flags = BLE_GATT_CHR_F_READ,
+            },
+            {0},
+        },
+    },
+    {0},
+};
+
+void ble_host_task(void *param) {
+    nimble_port_run(); 
+    nimble_port_freertos_deinit(); // Limpeza quando a tarefa é finalizada
+}
+
 void app_main(void)
 {
     //-------------ADC1 Init---------------//
@@ -59,8 +99,13 @@ void app_main(void)
     bool do_calibration1_chan0 = example_adc_calibration_init(ADC_UNIT_1, ADC1_CHAN3, ADC_ATTEN, &adc1_cali_chan0_handle);
     ESP_ERROR_CHECK(gpio_reset_pin(BUZZER_GPIO));
     ESP_ERROR_CHECK(gpio_set_direction(BUZZER_GPIO, GPIO_MODE_OUTPUT));
-
     
+    nimble_port_init();
+    ble_svc_gap_device_name_set(DEVICE_NAME);
+    ble_gatts_count_cfg(gatt_svr_svcs);
+    ble_gatts_add_svcs(gatt_svr_svcs);
+    nimble_port_freertos_init(ble_host_task);
+
     for (;;)
     {
         ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, ADC1_CHAN3, &adc_raw[0][0]));
@@ -91,6 +136,7 @@ void app_main(void)
             ESP_LOGI(TAG, "Pressure: %.2f kPa", pressure_kPa);
             float peso_percentual = calcular_peso_percentual(pressure_kPa);
             ESP_LOGI(TAG, "Peso percentual: %.2f%%", peso_percentual);
+            memcpy(peso_percentual_char, &peso_percentual, sizeof(peso_percentual));
         } else 
         {
                 ESP_LOGW(TAG, "Voltage below minimum. Invalid reading.");
