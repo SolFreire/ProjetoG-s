@@ -1,25 +1,14 @@
 #include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "soc/soc_caps.h"
-#include "esp_log.h"
-#include <esp_err.h>
 #include "esp_adc/adc_oneshot.h"
-#include "esp_adc/adc_cali.h"
-#include "esp_adc/adc_cali_scheme.h"
 #include "driver/gpio.h"
-#include "nimble/ble.h"
-#include "host/ble_hs.h"
-#include "esp_nimble_hci.h"
-#include "nimble/nimble_port.h"
-#include "nimble/nimble_port_freertos.h"
-#include "services/gap/ble_svc_gap.h"
-
-const static char *TAG = "";
+#include "ble.h"
+#include <os/os_mbuf.h>
 
 #define BUZZER_GPIO GPIO_NUM_15
+#define SET_BUTTON GPIO_NUM_2
 #define ADC1_CHAN3 ADC_CHANNEL_3
 #define ADC_ATTEN ADC_ATTEN_DB_12
 #define NUM_SAMPLES 10
@@ -28,142 +17,125 @@ const static char *TAG = "";
 #define SENSOR_MIN_VOLTAGE 200 // Tensão mínima em mV (0.2V)
 #define SENSOR_MAX_VOLTAGE 4700 // Tensão máxima em mV (4.7V)
 #define MAX_PRESSURE 10  // Faixa máxima de pressão do MPX5010 (10 kPa)
-#define DEVICE_NAME "ESP32_SENSOR"
+#define PRESSURE_THRESHOLD 20 // Limite de peso percentual para ativar o buzzer
 
-static uint8_t peso_percentual_char[4];
+const static char *TAG = "GasOn:";
 
 static int adc_raw[2][10];
 static int voltage[2][10];
+float pressao_maxima = -1;
 static bool example_adc_calibration_init(adc_unit_t unit, adc_channel_t channel, adc_atten_t atten, adc_cali_handle_t *out_handle);
 static void example_adc_calibration_deinit(adc_cali_handle_t handle);
 
 float calcular_peso_percentual(float pressao_kPa) {
-    float pressao_minima = 0.3;  // Pressão sem peso
-    float pressao_maxima = 1.4;  // Média entre 4.2 e 4.4 kPa (5 kg)
+    float pressao_minima = 0.3;  
     float peso_percentual = (pressao_kPa - pressao_minima) / (pressao_maxima - pressao_minima) * 100;
-    if (peso_percentual < 0) {
-        peso_percentual = 0;
-    } else if (peso_percentual > 100) {
-        peso_percentual = 100;
-    }
+    if (peso_percentual < 0) peso_percentual = 0;
+    else if (peso_percentual > 100) peso_percentual = 100;
     return peso_percentual;
 }
 
-static int peso_percentual_char_access(uint16_t conn_handle, uint16_t attr_handle,
-                                       struct ble_gatt_access_ctxt *ctxt, void *arg) {
-    // Leitura da característica pelo cliente BLE
-    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
-        float peso_percentual = *((float*)peso_percentual_char);
-        return os_mbuf_append(ctxt->om, &peso_percentual, sizeof(peso_percentual));
-    }
-    return BLE_ATT_ERR_UNLIKELY;
-}
+void app_main(void) {
+    // Inicialização do BLE
+    ble_init();
 
-static const struct ble_gatt_svc_def gatt_svr_svcs[] = {
-    {
-        .type = BLE_GATT_SVC_TYPE_PRIMARY,
-        .uuid = BLE_UUID16_DECLARE(0x180D), // Serviço de exemplo
-        .characteristics = (struct ble_gatt_chr_def[]){
-            {
-                .uuid = BLE_UUID16_DECLARE(0x2A37), // UUID da característica
-                .access_cb = peso_percentual_char_access,
-                .flags = BLE_GATT_CHR_F_READ,
-            },
-            {0},
-        },
-    },
-    {0},
-};
-
-void ble_host_task(void *param) {
-    nimble_port_run(); 
-    nimble_port_freertos_deinit(); // Limpeza quando a tarefa é finalizada
-}
-
-void app_main(void)
-{
-    //-------------ADC1 Init---------------//
+    // Configuração do ADC
     adc_oneshot_unit_handle_t adc1_handle;
-    adc_oneshot_unit_init_cfg_t init_config1 = {
-        .unit_id = ADC_UNIT_1,
-    };
-    ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config1, &adc1_handle));
-    //-------------ADC1 Config---------------//
-    adc_oneshot_chan_cfg_t config = {
-        .atten = ADC_ATTEN,
-        .bitwidth = ADC_BITWIDTH_DEFAULT,
-    };
+    adc_oneshot_unit_init_cfg_t init_config = {.unit_id = ADC_UNIT_1};
+    ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config, &adc1_handle));
+
+    adc_oneshot_chan_cfg_t config = {.atten = ADC_ATTEN, .bitwidth = ADC_BITWIDTH_DEFAULT};
     ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, ADC1_CHAN3, &config));
-    //-------------ADC1 Calibration Init---------------//
-    adc_cali_handle_t adc1_cali_chan0_handle = NULL;
-    bool do_calibration1_chan0 = example_adc_calibration_init(ADC_UNIT_1, ADC1_CHAN3, ADC_ATTEN, &adc1_cali_chan0_handle);
+
+    // Configuração do buzzer e botão
     ESP_ERROR_CHECK(gpio_reset_pin(BUZZER_GPIO));
     ESP_ERROR_CHECK(gpio_set_direction(BUZZER_GPIO, GPIO_MODE_OUTPUT));
-    
-    nimble_port_init();
-    ble_svc_gap_device_name_set(DEVICE_NAME);
-    ble_gatts_count_cfg(gatt_svr_svcs);
-    ble_gatts_add_svcs(gatt_svr_svcs);
-    nimble_port_freertos_init(ble_host_task);
 
-    for (;;)
-    {
+    ESP_ERROR_CHECK(gpio_reset_pin(SET_BUTTON));
+    ESP_ERROR_CHECK(gpio_set_direction(SET_BUTTON, GPIO_MODE_INPUT));
+
+    // Inicialização da calibração do ADC
+    adc_cali_handle_t adc1_cali_chan0_handle = NULL;
+    bool do_calibration1_chan0 = example_adc_calibration_init(ADC_UNIT_1, ADC1_CHAN3, ADC_ATTEN, &adc1_cali_chan0_handle);
+
+    for (;;) {
         ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, ADC1_CHAN3, &adc_raw[0][0]));
-        int adc_sum = 0; // Variável para acumular leituras
-        int adc_avg = 0; // Variável para armazenar a média
-        for (int i = 0; i < NUM_SAMPLES; i++)
-        {
-        ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, ADC1_CHAN3, &adc_raw[0][0]));
-        adc_sum += adc_raw[0][0];
-        vTaskDelay(pdMS_TO_TICKS(50)); 
+
+        int adc_sum = 0;
+        int adc_avg = 0;
+
+        // Leitura do ADC
+        for (int i = 0; i < NUM_SAMPLES; i++) {
+            ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, ADC1_CHAN3, &adc_raw[0][0]));
+            adc_sum += adc_raw[0][0];
+            vTaskDelay(pdMS_TO_TICKS(50)); 
         }
 
-        adc_avg = adc_sum / NUM_SAMPLES; //Média
+        adc_avg = adc_sum / NUM_SAMPLES;
         int voltage_mV = (adc_avg * V_REF) / MAX_ADC;
 
         ESP_LOGI(TAG, "voltage_mV: %d", voltage_mV);
 
-        if (do_calibration1_chan0)
-        {
-             ESP_ERROR_CHECK(adc_cali_raw_to_voltage(adc1_cali_chan0_handle, adc_avg, &voltage[0][0]));
-             //ESP_LOGI(TAG, "Average Voltage: %d mV", voltage[0][0] * 2);
-        }
-        float Vout = voltage_mV; // Tensão medida em mV
-        float Vs = 5000; 
-        if (Vout >= SENSOR_MIN_VOLTAGE)
-        {
+        if (voltage_mV >= SENSOR_MIN_VOLTAGE) {
+            // Calcular a pressão
+            float Vout = voltage_mV * 2; // Tensão medida em mV
+            float Vs = 5000; // Tensão de referência do sensor
             float pressure_kPa = ((Vout / Vs) - 0.04) / 0.09;
             ESP_LOGI(TAG, "Pressure: %.2f kPa", pressure_kPa);
+
+            // Verifica o botão e atualiza a pressão máxima, se pressionado
+            if (gpio_get_level(SET_BUTTON) == 0) {
+                pressao_maxima = pressure_kPa;
+                ESP_LOGI(TAG, "Nova pressão máxima capturada: %.2f kPa", pressao_maxima);
+            }
+
             float peso_percentual = calcular_peso_percentual(pressure_kPa);
             ESP_LOGI(TAG, "Peso percentual: %.2f%%", peso_percentual);
-            memcpy(peso_percentual_char, &peso_percentual, sizeof(peso_percentual));
-        } else 
-        {
-                ESP_LOGW(TAG, "Voltage below minimum. Invalid reading.");
+
+            // Ativa o buzzer se o peso percentual estiver abaixo do limite
+            if (peso_percentual < PRESSURE_THRESHOLD) {
+                gpio_set_level(BUZZER_GPIO, 1); // Liga o buzzer
+                ESP_LOGI(TAG, "Alerta: Peso abaixo de 20%%");
+            } else {
+                gpio_set_level(BUZZER_GPIO, 0); // Desliga o buzzer
+            }
+
+            // Envia a notificação BLE apenas com o valor numérico
+            char ble_data[10]; // Buffer para os dados BLE
+            snprintf(ble_data, sizeof(ble_data), "%.2f", peso_percentual);
+
+            struct os_mbuf *om = ble_hs_mbuf_from_flat(ble_data, strlen(ble_data));
+            if (om == NULL) {
+                ESP_LOGE(TAG, "Falha ao alocar buffer os_mbuf");
+            } else {
+                int rc = ble_gatts_notify_custom(conn_handle, encoder_handle, om);
+                if (rc != 0) {
+                    ESP_LOGE(TAG, "Falha ao enviar notificação BLE: %d", rc);
+                } else {
+                    ESP_LOGI(TAG, "Notificação enviada via BLE: %s", ble_data);
+                }
+            }
+        } else {
+            ESP_LOGI(TAG, "Voltage below minimum. Invalid reading.");
         }
-        //if (pressure_kPa < 0) pressure_kPa = 0;//PressureRange
-        //if (pressure_kPa > MAX_PRESSURE) pressure_kPa = MAX_PRESSURE;
-        
-        //gpio_set_level(BUZZER_GPIO,1);//Buzzer
-        //vTaskDelay(pdMS_TO_TICKS(200));
-        //gpio_set_level(BUZZER_GPIO,0);
-        vTaskDelay(pdMS_TO_TICKS(5000));
+
+        vTaskDelay(pdMS_TO_TICKS(500)); // Atraso de 0,5 segundos
     }
+
     // Tear Down
     ESP_ERROR_CHECK(adc_oneshot_del_unit(adc1_handle));
-    if (do_calibration1_chan0)
-    {
+    if (do_calibration1_chan0) {
         example_adc_calibration_deinit(adc1_cali_chan0_handle);
     }
 }
-static bool example_adc_calibration_init(adc_unit_t unit, adc_channel_t channel, adc_atten_t atten, adc_cali_handle_t *out_handle)
-{
+
+static bool example_adc_calibration_init(adc_unit_t unit, adc_channel_t channel, adc_atten_t atten, adc_cali_handle_t *out_handle) {
     adc_cali_handle_t handle = NULL;
     esp_err_t ret = ESP_FAIL;
     bool calibrated = false;
+
 #if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
-    if (!calibrated)
-    {
+    if (!calibrated) {
         ESP_LOGI(TAG, "calibration scheme version is %s", "Curve Fitting");
         adc_cali_curve_fitting_config_t cali_config = {
             .unit_id = unit,
@@ -172,15 +144,13 @@ static bool example_adc_calibration_init(adc_unit_t unit, adc_channel_t channel,
             .bitwidth = ADC_BITWIDTH_DEFAULT,
         };
         ret = adc_cali_create_scheme_curve_fitting(&cali_config, &handle);
-        if (ret == ESP_OK)
-        {
+        if (ret == ESP_OK) {
             calibrated = true;
         }
     }
 #endif
 #if ADC_CALI_SCHEME_LINE_FITTING_SUPPORTED
-    if (!calibrated)
-    {
+    if (!calibrated) {
         ESP_LOGI(TAG, "calibration scheme version is %s", "Line Fitting");
         adc_cali_line_fitting_config_t cali_config = {
             .unit_id = unit,
@@ -188,34 +158,33 @@ static bool example_adc_calibration_init(adc_unit_t unit, adc_channel_t channel,
             .bitwidth = ADC_BITWIDTH_DEFAULT,
         };
         ret = adc_cali_create_scheme_line_fitting(&cali_config, &handle);
-        if (ret == ESP_OK)
-        {
+        if (ret == ESP_OK) {
             calibrated = true;
         }
     }
 #endif
+
     *out_handle = handle;
-    if (ret == ESP_OK)
-    {
+    if (ret == ESP_OK) {
         ESP_LOGI(TAG, "Calibration Success");
-    }
-    else if (ret == ESP_ERR_NOT_SUPPORTED || !calibrated)
-    {
+    } else if (ret == ESP_ERR_NOT_SUPPORTED || !calibrated) {
         ESP_LOGW(TAG, "eFuse not burnt, skip software calibration");
-    }
-    else
-    {
+    } else {
         ESP_LOGE(TAG, "Invalid arg or no memory");
     }
+
     return calibrated;
 }
-static void example_adc_calibration_deinit(adc_cali_handle_t handle)
-{
+
+static void example_adc_calibration_deinit(adc_cali_handle_t handle) {
 #if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
-    ESP_LOGI(TAG, "deregister %s calibration scheme", "Curve Fitting");
-    ESP_ERROR_CHECK(adc_cali_delete_scheme_curve_fitting(handle));
-#elif ADC_CALI_SCHEME_LINE_FITTING_SUPPORTED
-    ESP_LOGI(TAG, "deregister %s calibration scheme", "Line Fitting");
-    ESP_ERROR_CHECK(adc_cali_delete_scheme_line_fitting(handle));
+    if (handle != NULL) {
+        adc_cali_delete_scheme_curve_fitting(handle);
+    }
+#endif
+#if ADC_CALI_SCHEME_LINE_FITTING_SUPPORTED
+    if (handle != NULL) {
+        adc_cali_delete_scheme_line_fitting(handle);
+    }
 #endif
 }
