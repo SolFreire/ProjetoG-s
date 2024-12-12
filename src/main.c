@@ -8,7 +8,10 @@
 #include <os/os_mbuf.h>
 
 #define BUZZER_GPIO GPIO_NUM_15
-#define SET_BUTTON GPIO_NUM_2
+#define SET_BUTTON GPIO_NUM_5
+#define BLUE GPIO_NUM_18
+#define RED GPIO_NUM_4
+#define GREEN GPIO_NUM_16
 #define ADC1_CHAN3 ADC_CHANNEL_3
 #define ADC_ATTEN ADC_ATTEN_DB_12
 #define NUM_SAMPLES 10
@@ -28,7 +31,7 @@ static bool example_adc_calibration_init(adc_unit_t unit, adc_channel_t channel,
 static void example_adc_calibration_deinit(adc_cali_handle_t handle);
 
 float calcular_peso_percentual(float pressao_kPa) {
-    float pressao_minima = 0.3;  
+    float pressao_minima = 0.2;  
     float peso_percentual = (pressao_kPa - pressao_minima) / (pressao_maxima - pressao_minima) * 100;
     if (peso_percentual < 0) peso_percentual = 0;
     else if (peso_percentual > 100) peso_percentual = 100;
@@ -36,6 +39,29 @@ float calcular_peso_percentual(float pressao_kPa) {
 }
 
 void app_main(void) {
+
+    ESP_ERROR_CHECK(gpio_reset_pin(BUZZER_GPIO));
+    ESP_ERROR_CHECK(gpio_set_direction(BUZZER_GPIO, GPIO_MODE_OUTPUT));
+
+    ESP_ERROR_CHECK(gpio_reset_pin(RED));
+    ESP_ERROR_CHECK(gpio_set_direction(RED, GPIO_MODE_OUTPUT));
+
+    ESP_ERROR_CHECK(gpio_reset_pin(GREEN));
+    ESP_ERROR_CHECK(gpio_set_direction(GREEN, GPIO_MODE_OUTPUT));
+
+    ESP_ERROR_CHECK(gpio_reset_pin(BLUE));
+    ESP_ERROR_CHECK(gpio_set_direction(BLUE, GPIO_MODE_OUTPUT));
+    
+
+    gpio_config_t io_config = {
+        .intr_type = GPIO_INTR_DISABLE,
+        .mode = GPIO_MODE_INPUT,
+        .pin_bit_mask = (1ULL << SET_BUTTON),
+        .pull_down_en = 0,
+        .pull_up_en = 1,
+    };
+    gpio_config(&io_config);
+
     // Inicialização do BLE
     ble_init();
 
@@ -83,8 +109,9 @@ void app_main(void) {
             float pressure_kPa = ((Vout / Vs) - 0.04) / 0.09;
             ESP_LOGI(TAG, "Pressure: %.2f kPa", pressure_kPa);
 
-            // Verifica o botão e atualiza a pressão máxima, se pressionado
-            if (gpio_get_level(SET_BUTTON) == 0) {
+            ESP_LOGI(TAG, "BOTAO %d", gpio_get_level(SET_BUTTON));
+            if (gpio_get_level(SET_BUTTON) == 0)
+            {
                 pressao_maxima = pressure_kPa;
                 ESP_LOGI(TAG, "Nova pressão máxima capturada: %.2f kPa", pressao_maxima);
             }
@@ -93,11 +120,28 @@ void app_main(void) {
             ESP_LOGI(TAG, "Peso percentual: %.2f%%", peso_percentual);
 
             // Ativa o buzzer se o peso percentual estiver abaixo do limite
-            if (peso_percentual < PRESSURE_THRESHOLD) {
+            if (peso_percentual < PRESSURE_THRESHOLD)
+            {
                 gpio_set_level(BUZZER_GPIO, 1); // Liga o buzzer
+                gpio_set_level(RED, 0);
+                gpio_set_level(GREEN, 1);
+                gpio_set_level(BLUE,1);
                 ESP_LOGI(TAG, "Alerta: Peso abaixo de 20%%");
-            } else {
+            }
+            else if (peso_percentual < 80)
+            {
+                gpio_set_level(RED, 1);
+                gpio_set_level(GREEN, 1);
+                gpio_set_level(BLUE,0);
+                gpio_set_level(BUZZER_GPIO, 0);
+            }
+            else
+            {
                 gpio_set_level(BUZZER_GPIO, 0); // Desliga o buzzer
+                gpio_set_level(RED, 1);
+                gpio_set_level(GREEN, 0);
+                gpio_set_level(BLUE,1);
+
             }
 
             // Envia a notificação BLE apenas com o valor numérico
