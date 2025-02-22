@@ -24,9 +24,9 @@
 
 const static char *TAG = "GasOn:";
 
-static int adc_raw[2][10];
-static int voltage[2][10];
-float pressao_maxima = -1;
+static int adc_raw;
+static int voltage;
+float pressao_maxima = 4.3;
 static bool example_adc_calibration_init(adc_unit_t unit, adc_channel_t channel, adc_atten_t atten, adc_cali_handle_t *out_handle);
 static void example_adc_calibration_deinit(adc_cali_handle_t handle);
 
@@ -73,42 +73,34 @@ void app_main(void) {
     adc_oneshot_chan_cfg_t config = {.atten = ADC_ATTEN, .bitwidth = ADC_BITWIDTH_DEFAULT};
     ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, ADC1_CHAN3, &config));
 
-    // Configuração do buzzer e botão
-    ESP_ERROR_CHECK(gpio_reset_pin(BUZZER_GPIO));
-    ESP_ERROR_CHECK(gpio_set_direction(BUZZER_GPIO, GPIO_MODE_OUTPUT));
-
-    ESP_ERROR_CHECK(gpio_reset_pin(SET_BUTTON));
-    ESP_ERROR_CHECK(gpio_set_direction(SET_BUTTON, GPIO_MODE_INPUT));
-
     // Inicialização da calibração do ADC
     adc_cali_handle_t adc1_cali_chan0_handle = NULL;
     bool do_calibration1_chan0 = example_adc_calibration_init(ADC_UNIT_1, ADC1_CHAN3, ADC_ATTEN, &adc1_cali_chan0_handle);
 
     for (;;) {
-        ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, ADC1_CHAN3, &adc_raw[0][0]));
+        ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, ADC1_CHAN3, &adc_raw));
 
         int adc_sum = 0;
         int adc_avg = 0;
 
         // Leitura do ADC
         for (int i = 0; i < NUM_SAMPLES; i++) {
-            ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, ADC1_CHAN3, &adc_raw[0][0]));
-            adc_sum += adc_raw[0][0];
+            ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, ADC1_CHAN3, &adc_raw));
+            adc_sum += adc_raw;
             vTaskDelay(pdMS_TO_TICKS(50)); 
         }
 
         adc_avg = adc_sum / NUM_SAMPLES;
-        int voltage_mV = (adc_avg * V_REF) / MAX_ADC;
+        float Vout = adc_avg * 2;
 
-        ESP_LOGI(TAG, "voltage_mV: %d", voltage_mV);
+        
 
-        if (voltage_mV >= SENSOR_MIN_VOLTAGE) {
-            // Calcular a pressão
-            float Vout = voltage_mV * 2; // Tensão medida em mV
-            float Vs = 5000; // Tensão de referência do sensor
-            float pressure_kPa = ((Vout / Vs) - 0.04) / 0.09;
+        if (Vout >= SENSOR_MIN_VOLTAGE) {
+            
+            float pressure_kPa = ((Vout / 5000) - 0.04) / 0.09;
             ESP_LOGI(TAG, "Pressure: %.2f kPa", pressure_kPa);
 
+            // Verifica o botão e atualiza a pressão máxima, se pressionado
             ESP_LOGI(TAG, "BOTAO %d", gpio_get_level(SET_BUTTON));
             if (gpio_get_level(SET_BUTTON) == 0)
             {
